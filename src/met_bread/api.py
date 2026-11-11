@@ -94,14 +94,6 @@ def create_app(
     )
     async def get_works(
         request: Request,
-        limit: Annotated[
-            int,
-            Query(
-                ge=1,
-                le=settings.max_limit,
-                description=f"How many works to return (1 to {settings.max_limit}); required",
-            ),
-        ],
         q: Annotated[
             str,
             Query(
@@ -111,6 +103,14 @@ def create_app(
             ),
             AfterValidator(_validate_query),
         ] = settings.default_query,
+        limit: Annotated[
+            int,
+            Query(
+                ge=1,
+                le=settings.max_limit,
+                description=f"How many works to return (1 to {settings.max_limit})",
+            ),
+        ] = settings.default_limit,
     ) -> WorksResponse:
         provider: WorksProvider = request.app.state.service
         return await provider.top_recent(q, limit)

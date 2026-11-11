@@ -8,7 +8,8 @@ for a term (default `bread`) and returns the most recent matching works, ordered
 GET /api/works?q=bread&limit=5
 ```
 
-`limit` is required (1 to 20); `q` defaults to `bread` and must be ASCII.
+Both parameters are optional: `q` defaults to `bread` and must be ASCII; `limit` defaults to 5
+and must be between 1 and 20.
 
 ## Quick start
 
@@ -34,8 +35,8 @@ the `MET_` prefix; see [.env.example](.env.example).
 
 ## API
 
-`GET /api/works` with a required `limit` (integer, 1 to 20) and an optional `q`
-(1 to 100 ASCII characters, not blank, default `bread`).
+`GET /api/works` with optional `q` (1 to 100 ASCII characters, not blank, default `bread`)
+and optional `limit` (integer, 1 to 20, default 5).
 
 ```json
 {
@@ -62,7 +63,7 @@ the `MET_` prefix; see [.env.example](.env.example).
 | Status | Meaning |
 |---|---|
 | 200 | Success. `results` may be shorter than `limit` if fewer works match. |
-| 400 | Malformed input: `limit` missing, non-integer or out of bounds; `q` blank, too long or containing non-ASCII characters. The body lists the offending parameter. |
+| 400 | Malformed input: `limit` non-integer or out of bounds; `q` blank, too long or containing non-ASCII characters. The body lists the offending parameter. |
 | 502 | The Met API failed after retries. |
 | 503 | The Met is rate-limiting this service. `Retry-After` says when to try again. |
 

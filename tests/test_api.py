@@ -52,16 +52,23 @@ def make_client(settings):
     return factory
 
 
-def test_query_defaults_to_bread(make_client):
+def test_defaults_to_bread_and_five_results(make_client):
     service = FakeService()
     with make_client(service) as http:
-        response = http.get("/api/works", params={"limit": 5})
+        response = http.get("/api/works")
     assert response.status_code == 200
     assert service.calls == [("bread", 5)]
     body = response.json()
     assert set(body) == {"query", "total_matches", "exact", "results"}
     assert body["results"][0]["object_id"] == 299320
     assert body["results"][0]["image_url"] is None
+
+
+def test_limit_alone_keeps_default_query(make_client):
+    service = FakeService()
+    with make_client(service) as http:
+        assert http.get("/api/works", params={"limit": 3}).status_code == 200
+    assert service.calls == [("bread", 3)]
 
 
 def test_custom_query_and_limit_are_passed_through(make_client):
@@ -81,7 +88,6 @@ def test_custom_query_and_limit_are_passed_through(make_client):
         pytest.param({"limit": 5, "q": "br\u00ebad"}, id="q-latin-accent"),
         pytest.param({"limit": 5, "q": "\u30d1\u30f3"}, id="q-non-latin-script"),
         pytest.param({"limit": 5, "q": "bread \U0001f35e"}, id="q-emoji"),
-        pytest.param({"q": "bread"}, id="limit-missing"),
         pytest.param({"q": "bread", "limit": 0}, id="limit-too-small"),
         pytest.param({"q": "bread", "limit": 21}, id="limit-too-large"),
         pytest.param({"q": "bread", "limit": "five"}, id="limit-not-an-integer"),

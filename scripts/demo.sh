@@ -26,12 +26,11 @@ print(meta)
 }
 
 show "Health"                              "$BASE/health"
-show "Default query (bread), 5 results"    "$BASE/api/works?limit=5"
-show "Same again: served from cache"       "$BASE/api/works?limit=5"
+show "Default query (bread), 5 results"    "$BASE/api/works"
+show "Same again: served from cache"       "$BASE/api/works"
 show "Custom term and limit"               "$BASE/api/works?q=cheese&limit=3"
-show "No matches"                          "$BASE/api/works?q=xyzzyqwertyzz&limit=5"
-show "Validation: limit is required"       "$BASE/api/works"
+show "No matches"                          "$BASE/api/works?q=xyzzyqwertyzz"
 show "Validation: limit out of bounds"     "$BASE/api/works?limit=50"
-show "Validation: non-ASCII query"         "$BASE/api/works?q=br%C3%ABad&limit=5"
-show "Validation: blank query"             "$BASE/api/works?q=%20&limit=5"
+show "Validation: non-ASCII query"         "$BASE/api/works?q=br%C3%ABad"
+show "Validation: blank query"             "$BASE/api/works?q=%20"
 printf '\nInteractive docs: %s/docs\n' "$BASE"
