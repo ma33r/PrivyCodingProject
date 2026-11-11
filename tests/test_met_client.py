@@ -166,3 +166,28 @@ class TestResilience:
         results = await asyncio.gather(*(client.get_object(i) for i in range(12)))
         assert len(results) == 12
         assert 1 < inflight["max"] <= settings.max_concurrency
+
+
+class TestPacing:
+    async def test_requests_go_through_the_rate_limiter(self, settings, respx_mock):
+        from met_bread.pacing import RateLimiter
+
+        sleeps: list[float] = []
+
+        async def record_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        limiter = RateLimiter(100, clock=lambda: 0.0, sleep=record_sleep)
+        respx_mock.get(url__regex=rf"{OBJECTS}/\d+").respond(json={"objectID": 1})
+        async with httpx.AsyncClient() as http:
+            client = MetClient(http, settings, limiter=limiter)
+            await asyncio.gather(*(client.get_object(i) for i in range(3)))
+        assert len(sleeps) == 2  # first request immediate, two more spaced out
+
+    async def test_default_limiter_comes_from_settings(self, respx_mock):
+        from met_bread.config import Settings
+
+        settings = Settings(_env_file=None, max_requests_per_second=0, warm_cache=False)
+        async with httpx.AsyncClient() as http:
+            client = MetClient(http, settings)
+        assert client.limiter.rate_per_s == 0

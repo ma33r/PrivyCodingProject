@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # Politeness / resilience. The Met asks for < 80 req/s; its edge 403s well before that
     # when requests arrive in a tight burst, so we keep concurrency modest and retry with backoff.
     max_concurrency: int = Field(6, ge=1)
+    # Observed: ~150 requests within ~5 s earned a multi-second 403 block, so pace well below
+    # that. One cold query costs ~35 requests; 0 disables pacing (tests).
+    max_requests_per_second: float = Field(15.0, ge=0)
     max_retries: int = Field(3, ge=0)
     backoff_base_s: float = Field(0.5, ge=0)
 

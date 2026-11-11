@@ -95,8 +95,10 @@ class TestTopRecent:
         assert ids(response) == [299320, 471028, 284537, 748765, 861237]
         assert response.exact is True
         assert response.total_matches == len(MODERN) + 1 + len(OLD_TAIL)
-        # The whole point: we did not fetch the 200-object tail.
+        # The whole point: we did not fetch the 200-object tail, and the whole request
+        # stayed within a modest upstream budget (the Met's edge throttles bursty clients).
         assert len(client.fetched) < 20
+        assert client.requests_made <= 35
 
     async def test_results_are_well_formed_works(self, settings: Settings):
         service = WorksService(FakeMetClient(MODERN), settings)

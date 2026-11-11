@@ -15,17 +15,18 @@ from met_bread.models import MetObject
 
 CountFrom = Callable[[int], Awaitable[int]]
 
-#: First-round probe years, descending. 2100 is a sentinel above any real date so the
-#: refinement loop always starts with a known upper bound; spacing widens into antiquity
-#: where the collection is sparse; -9999 is the floor the Met itself uses.
+#: First-round probe years, descending. The grid is dense where thresholds actually land
+#: (the most recent works for almost any term are modern) and sparse in antiquity. 2100 is a
+#: sentinel above any real date so the refinement loop always has a known upper bound;
+#: -9999 is the floor the Met itself uses.
 DEFAULT_PROBES: tuple[int, ...] = (
-    2100, 2000, 1900, 1800, 1700, 1600, 1500, 1400, 1300, 1200, 1100, 1000,
-    500, 0, -1000, -3000, -9999,
+    2100, 2020, 2000, 1980, 1950, 1900, 1800, 1700, 1600, 1500, 1000, 0, -1000, -9999,
 )  # fmt: skip
 
-#: How many evenly spaced years to probe per refinement round. Each round shrinks the
-#: candidate span by this factor, so a 100-year span resolves to a single year in two rounds.
-_PROBES_PER_ROUND = 10
+#: Interior probes per refinement round. Each round shrinks the span by this factor plus one
+#: (a 20-year span resolves to a single year in two rounds). Fewer probes per round means
+#: more round trips but fewer total requests, and request volume is what the Met throttles.
+_PROBES_PER_ROUND = 4
 
 
 async def find_threshold_year(
@@ -67,7 +68,7 @@ async def find_threshold_year(
     high = probes[first_hit - 1] if first_hit > 0 else low + 100
 
     while high - low > 1:
-        step = max(1, (high - low) // _PROBES_PER_ROUND)
+        step = max(1, (high - low) // (_PROBES_PER_ROUND + 1))
         years = list(range(high - step, low, -step))  # strictly inside (low, high), descending
         counts = await asyncio.gather(*(count_from(year) for year in years))
         hit = next((i for i, count in enumerate(counts) if count >= need), None)

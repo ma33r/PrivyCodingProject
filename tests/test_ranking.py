@@ -60,7 +60,9 @@ class TestFindThresholdYear:
         count_from, calls, _ = make_counter(begins)
         # Exactly five objects begin in 1987 or later; only four begin in 1988 or later.
         assert await find_threshold_year(count_from, need=5) == 1987
-        assert len(calls) < 60  # a few parallel rounds, not a per-year scan
+        # A dense grid in recent centuries plus small refinement rounds: ~20 probes,
+        # not a per-year scan. This is a regression guard on upstream request volume.
+        assert len(calls) <= 25
 
     async def test_returns_none_when_collection_is_smaller_than_need(self):
         count_from, _, _ = make_counter([2000, 1900])

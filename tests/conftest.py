@@ -31,6 +31,7 @@ def settings() -> Settings:
         backoff_base_s=0.0,
         max_retries=2,
         max_concurrency=3,
+        max_requests_per_second=0,
         cache_ttl_s=60.0,
         warm_cache=False,
     )

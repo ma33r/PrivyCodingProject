@@ -23,6 +23,7 @@ import httpx
 
 from met_bread.config import Settings
 from met_bread.models import MetObject, SearchResponse
+from met_bread.pacing import RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +52,21 @@ class MetClient:
     connection pool and tests can point it at a mock transport.
     """
 
-    def __init__(self, http: httpx.AsyncClient, settings: Settings) -> None:
+    def __init__(
+        self,
+        http: httpx.AsyncClient,
+        settings: Settings,
+        limiter: RateLimiter | None = None,
+    ) -> None:
         self._http = http
         self._settings = settings
         self._base_url = settings.base_url.rstrip("/")
+        # Two independent brakes: the semaphore caps how many requests are in flight at
+        # once, the limiter caps how many are *started* per second (see pacing.py).
         self._semaphore = asyncio.Semaphore(settings.max_concurrency)
+        self.limiter = (
+            limiter if limiter is not None else RateLimiter(settings.max_requests_per_second)
+        )
         #: Total HTTP attempts issued, including retries. Useful for logging and tests.
         self.requests_made = 0
 
@@ -164,10 +175,11 @@ class MetClient:
             if attempt > 1:
                 await asyncio.sleep(self._backoff_seconds(attempt))
 
+            await self.limiter.acquire()
             self.requests_made += 1
             try:
-                # Only the request itself is under the semaphore; backoff sleeps happen
-                # outside it so a stalled retry does not hold a slot other calls could use.
+                # Only the request itself is under the semaphore; pacing and backoff waits
+                # happen outside it so they do not hold a slot other calls could use.
                 async with self._semaphore:
                     response = await self._http.get(
                         url,
