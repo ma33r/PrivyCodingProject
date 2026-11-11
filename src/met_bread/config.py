@@ -6,7 +6,7 @@ so deployments can tune concurrency, cache lifetime and limits without code chan
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,15 +22,25 @@ class Settings(BaseSettings):
     user_agent: str = "met-bread-api/0.1 (+https://github.com/ma33r/PrivyCodingProject)"
 
     # Politeness / resilience. The Met documents an 80 req/s ceiling, but its edge protection
-    # blocks (HTTP 403) a client that sends roughly a hundred requests within half a minute,
-    # and the block outlasts any sensible in-request retry. So: modest concurrency, smoothed
-    # request rate, retries only for genuinely transient failures, and a cooldown during
-    # which we stop sending altogether after a 403 (see met_client.py).
+    # blocks (HTTP 403) a client that sends roughly a hundred requests within half a minute.
+    # So: modest concurrency, a smoothed request rate, short jittered retries for transient
+    # failures, and for a 403 a longer, increasing wait-and-retry schedule followed by a
+    # cooldown during which we stop sending altogether (see met_client.py).
     max_concurrency: int = Field(6, ge=1)
     max_requests_per_second: float = Field(40.0, ge=0)  # 0 disables pacing (tests)
     max_retries: int = Field(3, ge=0)
     backoff_base_s: float = Field(0.5, ge=0)
+    # Seconds to wait before each retry of a request the Met answered with 403. Exhausting
+    # the list raises MetThrottledError and starts the cooldown. Empty list = fail fast.
+    throttle_backoff_s: list[float] = Field(default_factory=lambda: [3.0, 7.0, 15.0])
     throttle_cooldown_s: float = Field(30.0, ge=0)
+
+    @field_validator("throttle_backoff_s")
+    @classmethod
+    def _waits_are_non_negative(cls, waits: list[float]) -> list[float]:
+        if any(wait < 0 for wait in waits):
+            raise ValueError("throttle_backoff_s entries must be >= 0")
+        return waits
 
     # Search pagination constraints imposed by the Met: pages of at most 500, and
     # offset + limit may not exceed 10 000 (so larger result sets cannot be fully enumerated).

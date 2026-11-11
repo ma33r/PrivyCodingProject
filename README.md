@@ -66,7 +66,7 @@ and optional `limit` (integer, 1 to 20, default 5).
 | 200 | Success. `results` may be shorter than `limit` if fewer works match. |
 | 400 | Malformed input: `limit` non-integer or out of bounds; `q` blank, too long or containing non-ASCII characters. The body lists the offending parameter. |
 | 502 | The Met API failed after retries. |
-| 503 | The Met is rate-limiting this service. `Retry-After` says when to try again. |
+| 503 | The Met's bot protection blocked us even after waiting 3, 7 and 15 seconds between retries. `Retry-After` says when to try again. |
 
 `exact` is `true` when every matching object was considered. It is `false` only for terms
 with more than 10 000 matches, where the Met API cannot enumerate the full result set (see
@@ -128,10 +128,12 @@ Measured while building this, not taken from the docs:
   a minute or so.
 
 So the client ([met_client.py](src/met_bread/met_client.py)) identifies itself with a
-User-Agent, caps in-flight requests, smooths the outgoing rate, and retries only genuinely
-transient failures. A 403 is treated as throttling: no retry, a 30-second cooldown during
-which the client fails fast, and a 503 with `Retry-After` to our own callers. The cache
-means a busy service mostly never reaches the Met at all.
+User-Agent, caps in-flight requests, smooths the outgoing rate, and retries transient
+failures with short jittered backoff. A 403 is treated as throttling and gets a longer,
+increasing wait-and-retry schedule (3, 7, then 15 seconds; `MET_THROTTLE_BACKOFF_S`). If the
+block outlasts that, the client enters a 30-second cooldown during which it fails fast, and
+our own callers get a 503 with `Retry-After`. The cache means a busy service mostly never
+reaches the Met at all.
 
 ## Project layout
 
@@ -167,8 +169,10 @@ the spanning-object case. CI runs lint, type-check and tests on every push and p
 - **Sequential bisection over parallel probing.** Requests are paced anyway, so parallel
   probes would only cost more of the Met's request budget for no latency gain.
 - **In-process cache.** Fine for one instance; swap for Redis to scale out.
-- **Fail fast on throttling.** Waiting out the Met's block inside a request would mean
-  30-second responses. A 503 with `Retry-After` is honest and lets callers decide.
+- **Bounded patience on throttling.** A blocked request waits up to 25 seconds across three
+  retries before giving up, so callers see slow answers rather than failures during short
+  blocks. Longer blocks (the ones observed lasted about a minute) still end in a 503 with
+  `Retry-After`, and the cooldown stops other requests from each paying the 25 seconds.
 - **400, not 422, for bad input.** FastAPI defaults to 422, which comes from WebDAV and is
   best suited to semantically invalid request bodies. For malformed query parameters, 400 is
   the conventional status every client understands; one handler maps all validation errors

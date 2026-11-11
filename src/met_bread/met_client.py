@@ -5,9 +5,10 @@ Responsibilities, and nothing more:
 * Build correct URLs/params for ``/v1.1/search`` and ``/v1/objects/{id}``.
 * Enforce politeness: an identifying User-Agent, bounded concurrency, a smoothed request
   rate, and retries with exponential backoff for transient failures.
-* Fail fast when the Met's edge protection kicks in (HTTP 403 with an HTML body): the block
-  lasts far longer than any sane retry budget, so the client enters a cooldown during which
-  every call raises ``MetThrottledError`` immediately instead of making things worse.
+* Ride out the Met's edge protection (HTTP 403 with an HTML body) when it is short: wait,
+  retry, and wait longer each time following ``Settings.throttle_backoff_s`` (3, 7, 15 s by
+  default). If the block outlasts the schedule, raise ``MetThrottledError`` and enter a
+  cooldown during which every call fails immediately instead of making things worse.
 * Page through search results while respecting the Met's hard 10 000-result ceiling.
 
 Everything that interprets the data (thresholds, ranking) lives elsewhere.
@@ -20,7 +21,7 @@ import logging
 import math
 import random
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -31,8 +32,8 @@ from met_bread.pacing import RateLimiter
 
 logger = logging.getLogger(__name__)
 
-#: Statuses worth retrying. 403 is deliberately *not* here: it is the Met's bot protection,
-#: which does not clear within a request's lifetime (see ``MetThrottledError``).
+#: Statuses retried with the short, jittered transient backoff. 403 is handled separately:
+#: it is the Met's bot protection and gets the longer ``throttle_backoff_s`` schedule.
 _RETRYABLE_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 
@@ -70,11 +71,13 @@ class MetClient:
         settings: Settings,
         limiter: RateLimiter | None = None,
         clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._http = http
         self._settings = settings
         self._base_url = settings.base_url.rstrip("/")
         self._clock = clock
+        self._sleep = sleep  # injectable so tests can assert waits without waiting
         self._throttled_until = 0.0
         # Two independent brakes: the semaphore caps how many requests are in flight at
         # once, the limiter caps how many are *started* per second (see pacing.py).
@@ -176,23 +179,30 @@ class MetClient:
         params: dict[str, Any] | None,
         none_on_404: bool = False,
     ) -> Any:
-        """GET ``url`` and return its decoded JSON body, retrying transient failures.
+        """GET ``url`` and return its decoded JSON body, retrying failures by category.
 
-        Retryable: transport errors, the statuses in ``_RETRYABLE_STATUSES``, and any
-        response whose body is not JSON. Not retryable: 403 (edge protection: opens a
-        cooldown and raises ``MetThrottledError``), 404 (optionally mapped to ``None``) and
-        other 4xx responses, which indicate a bug on our side rather than a transient issue.
+        Two independent retry budgets:
+
+        * **Transient** (transport errors, ``_RETRYABLE_STATUSES``, non-JSON bodies): up to
+          ``max_retries`` retries with short, jittered exponential backoff.
+        * **Throttled** (HTTP 403, the Met's bot protection): one retry per entry in
+          ``throttle_backoff_s``, waiting that many seconds first. Exhausting the schedule
+          opens the client-wide cooldown and raises ``MetThrottledError``.
+
+        Not retried: 404 (optionally mapped to ``None``) and other 4xx responses, which
+        indicate a bug on our side rather than a transient upstream issue.
         """
-        attempts = self._settings.max_retries + 1
-        failure = "unknown"
+        schedule = self._settings.throttle_backoff_s
+        transient_failures = 0
+        throttle_waits = 0
 
-        for attempt in range(1, attempts + 1):
-            if attempt > 1:
-                await asyncio.sleep(self._backoff_seconds(attempt))
-
+        while True:
             self._raise_if_throttled()
             await self.limiter.acquire()
             self.requests_made += 1
+            attempt = transient_failures + throttle_waits + 1
+            failure: str
+
             try:
                 # Only the request itself is under the semaphore; pacing and backoff waits
                 # happen outside it so they do not hold a slot other calls could use.
@@ -205,32 +215,43 @@ class MetClient:
                     )
             except httpx.TransportError as exc:
                 failure = f"transport error ({type(exc).__name__})"
-                logger.warning("Met request failed: %s url=%s attempt=%d", failure, url, attempt)
-                continue
+            else:
+                status = response.status_code
+                if status == 403:
+                    if throttle_waits >= len(schedule):
+                        self._enter_cooldown(url)  # raises MetThrottledError
+                    wait = schedule[throttle_waits]
+                    throttle_waits += 1
+                    logger.warning(
+                        "Met edge protection returned 403 (url=%s); waiting %.0fs before "
+                        "retry %d/%d",
+                        url,
+                        wait,
+                        throttle_waits,
+                        len(schedule),
+                    )
+                    await self._sleep(wait)
+                    continue
+                if status == 404 and none_on_404:
+                    return None
+                if status in _RETRYABLE_STATUSES or status >= 500:
+                    failure = f"HTTP {status}"
+                elif status != 200:
+                    raise MetUpstreamError(f"unexpected HTTP {status} from {url}")
+                else:
+                    try:
+                        return response.json()
+                    except ValueError:
+                        # Never log the body: interstitial pages are large HTML.
+                        failure = "non-JSON body"
 
-            status = response.status_code
-            if status == 403:
-                self._enter_cooldown(url)
-            if status == 404 and none_on_404:
-                return None
-            if status in _RETRYABLE_STATUSES or status >= 500:
-                failure = f"HTTP {status}"
-                logger.warning("Met request failed: %s url=%s attempt=%d", failure, url, attempt)
-                continue
-            if status != 200:
-                raise MetUpstreamError(f"unexpected HTTP {status} from {url}")
-
-            try:
-                return response.json()
-            except ValueError:
-                # Never log the body: the interstitial is a large HTML page.
-                failure = "non-JSON body"
-                logger.warning("Met request failed: %s url=%s attempt=%d", failure, url, attempt)
-                continue
-
-        raise MetUpstreamError(
-            f"Met API request failed after {attempts} attempts ({failure}): {url}"
-        )
+            transient_failures += 1
+            logger.warning("Met request failed: %s url=%s attempt=%d", failure, url, attempt)
+            if transient_failures > self._settings.max_retries:
+                raise MetUpstreamError(
+                    f"Met API request failed after {transient_failures} attempts ({failure}): {url}"
+                )
+            await self._sleep(self._backoff_seconds(transient_failures))
 
     def _raise_if_throttled(self) -> None:
         remaining = self._throttled_until - self._clock()
@@ -241,16 +262,18 @@ class MetClient:
         cooldown = self._settings.throttle_cooldown_s
         self._throttled_until = self._clock() + cooldown
         logger.warning(
-            "Met edge protection returned 403 (url=%s); pausing all requests for %.0fs",
+            "Met edge protection still returning 403 after %d retries (url=%s); pausing all "
+            "requests for %.0fs",
+            len(self._settings.throttle_backoff_s),
             url,
             cooldown,
         )
         raise MetThrottledError(retry_after_s=cooldown)
 
-    def _backoff_seconds(self, attempt: int) -> float:
-        """Exponential backoff with full jitter: base * 2^(n-1) plus up to one extra base."""
+    def _backoff_seconds(self, failures: int) -> float:
+        """Backoff after the n-th transient failure: base * 2^(n-1) plus jitter in [0, base)."""
         base = self._settings.backoff_base_s
-        return base * math.pow(2, attempt - 2) + random.uniform(0, base)
+        return base * math.pow(2, failures - 1) + random.uniform(0, base)
 
 
 def _date_params(date_begin: int | None, date_end: int | None) -> dict[str, int]:

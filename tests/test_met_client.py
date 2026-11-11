@@ -184,38 +184,116 @@ class TestPacing:
 
 
 class TestThrottling:
-    """A 403 from the Met is its edge protection, which lasts far longer than any sane
-    in-request retry budget. Fail fast, and stop sending for a while."""
+    """A 403 from the Met is its edge protection. Wait, retry with increasing delays, and only
+    give up (entering a cooldown so other requests fail fast) once the schedule is exhausted."""
 
-    def _blocked(self) -> httpx.Response:
+    @staticmethod
+    def _blocked() -> httpx.Response:
         return httpx.Response(
             403, text=load_fixture_text("blocked_403.html"), headers={"content-type": "text/html"}
         )
 
-    async def test_403_fails_fast_without_retrying(self, client, respx_mock):
-        route = respx_mock.get(f"{OBJECTS}/1").mock(return_value=self._blocked())
-        with pytest.raises(MetThrottledError) as excinfo:
-            await client.get_object(1)
-        assert route.call_count == 1
-        assert excinfo.value.retry_after_s > 0
-        assert isinstance(excinfo.value, MetUpstreamError)  # generic handlers still apply
+    @staticmethod
+    def _ok() -> httpx.Response:
+        return httpx.Response(200, json={"objectID": 1})
 
-    async def test_subsequent_calls_short_circuit_during_cooldown(self, client, respx_mock):
-        route = respx_mock.get(f"{OBJECTS}/1").mock(return_value=self._blocked())
-        with pytest.raises(MetThrottledError):
-            await client.get_object(1)
-        with pytest.raises(MetThrottledError):
-            await client.search_total("bread")
-        assert route.call_count == 1  # nothing else was sent to the Met
+    @pytest.fixture
+    def harness(self, settings):
+        """Client with a frozen clock and a recording sleep: no real waiting, exact assertions."""
 
-    async def test_cooldown_expires(self, settings, respx_mock):
-        now = {"t": 1000.0}
+        class Harness:
+            def __init__(self, cfg) -> None:
+                self.now = 1000.0
+                self.sleeps: list[float] = []
+                self.http = httpx.AsyncClient()
+                self.client = MetClient(self.http, cfg, clock=lambda: self.now, sleep=self._sleep)
+
+            async def _sleep(self, seconds: float) -> None:
+                self.sleeps.append(seconds)
+
+            def waits(self) -> list[float]:
+                return [s for s in self.sleeps if s > 0]  # drop zero-length transient backoffs
+
+        return Harness
+
+    async def test_waits_then_retries_following_the_schedule(self, harness, settings, respx_mock):
+        h = harness(settings)
         route = respx_mock.get(f"{OBJECTS}/1")
-        route.side_effect = [self._blocked(), httpx.Response(200, json={"objectID": 1})]
-        async with httpx.AsyncClient() as http:
-            client = MetClient(http, settings, clock=lambda: now["t"])
+        route.side_effect = [self._blocked()] * 3 + [self._ok(), self._ok()]
+        async with h.http:
+            assert await h.client.get_object(1) is not None
+            # Recovery means no cooldown: the next request goes straight through.
+            assert await h.client.get_object(1) is not None
+        assert h.waits() == [3.0, 7.0, 15.0]
+        assert route.call_count == 5
+
+    async def test_gives_up_after_the_schedule_and_enters_cooldown(
+        self, harness, settings, respx_mock
+    ):
+        h = harness(settings)
+        route = respx_mock.get(f"{OBJECTS}/1").mock(return_value=self._blocked())
+        async with h.http:
+            with pytest.raises(MetThrottledError) as excinfo:
+                await h.client.get_object(1)
+            assert route.call_count == 4  # one try per schedule entry, plus the first
+            assert h.waits() == [3.0, 7.0, 15.0]
+            assert excinfo.value.retry_after_s == settings.throttle_cooldown_s
+            assert isinstance(excinfo.value, MetUpstreamError)
+            # Everything else fails fast during the cooldown, without touching the Met.
             with pytest.raises(MetThrottledError):
-                await client.get_object(1)
-            now["t"] += settings.throttle_cooldown_s + 1
-            assert await client.get_object(1) is not None
-        assert route.call_count == 2
+                await h.client.search_total("bread")
+        assert route.call_count == 4
+
+    async def test_cooldown_expires(self, harness, settings, respx_mock):
+        h = harness(settings)
+        route = respx_mock.get(f"{OBJECTS}/1")
+        route.side_effect = [self._blocked()] * 4 + [self._ok()]
+        async with h.http:
+            with pytest.raises(MetThrottledError):
+                await h.client.get_object(1)
+            h.now += settings.throttle_cooldown_s + 1
+            assert await h.client.get_object(1) is not None
+        assert route.call_count == 5
+
+    async def test_throttle_waits_do_not_consume_the_transient_retry_budget(
+        self, harness, respx_mock
+    ):
+        from met_bread.config import Settings
+
+        cfg = Settings(_env_file=None, max_retries=1, backoff_base_s=0.0, max_requests_per_second=0)
+        h = harness(cfg)
+        route = respx_mock.get(f"{OBJECTS}/1")
+        route.side_effect = [
+            self._blocked(),
+            httpx.Response(503, json={"message": "down"}),
+            self._blocked(),
+            self._ok(),
+        ]
+        async with h.http:
+            assert await h.client.get_object(1) is not None
+        assert h.waits() == [3.0, 7.0]
+        assert route.call_count == 4
+
+    async def test_schedule_is_configurable(self, harness, respx_mock):
+        from met_bread.config import Settings
+
+        cfg = Settings(_env_file=None, throttle_backoff_s=[1, 2], max_requests_per_second=0)
+        h = harness(cfg)
+        route = respx_mock.get(f"{OBJECTS}/1").mock(return_value=self._blocked())
+        async with h.http:
+            with pytest.raises(MetThrottledError):
+                await h.client.get_object(1)
+        assert h.waits() == [1.0, 2.0]
+        assert route.call_count == 3
+
+    async def test_empty_schedule_fails_fast(self, harness, respx_mock):
+        from met_bread.config import Settings
+
+        cfg = Settings(_env_file=None, throttle_backoff_s=[], max_requests_per_second=0)
+        h = harness(cfg)
+        route = respx_mock.get(f"{OBJECTS}/1").mock(return_value=self._blocked())
+        async with h.http:
+            with pytest.raises(MetThrottledError):
+                await h.client.get_object(1)
+        assert h.waits() == []
+        assert route.call_count == 1
