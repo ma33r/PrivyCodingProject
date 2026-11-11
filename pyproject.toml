@@ -37,6 +37,10 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = ["live: hits the real Met API; run with MET_LIVE=1"]
+filterwarnings = [
+    # Starlette's TestClient warns about httpx vs the newer httpx2; irrelevant to this project.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:DeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 100
