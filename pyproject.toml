@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "met-bread"
+version = "0.1.0"
+description = "API server returning the most recent Met Museum works for a search term"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "httpx>=0.27,<1",
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.3,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.23,<2",
+    "respx>=0.21,<1",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+met-bread = "met_bread.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = ["live: hits the real Met API; run with MET_LIVE=1"]
+filterwarnings = [
+    # Starlette's TestClient warns about httpx vs the newer httpx2; irrelevant to this project.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF", "ANN", "D"]
+ignore = ["D104", "D107", "ANN401"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D", "ANN"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+files = ["src"]
