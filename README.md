@@ -8,6 +8,8 @@ for a term (default `bread`) and returns the most recent matching works, ordered
 GET /api/works?q=bread&limit=5
 ```
 
+`limit` is required (1 to 20); `q` defaults to `bread` and must be ASCII.
+
 ## Quick start
 
 Requires Python 3.12.
@@ -15,7 +17,7 @@ Requires Python 3.12.
 ```bash
 make install            # creates .venv and installs the package with dev tools
 make run                # serves on http://127.0.0.1:8000
-make demo               # in another terminal: walks through the endpoints
+make demo               # in another terminal: walks through the endpoints and error cases
 ```
 
 Or by hand:
@@ -32,8 +34,8 @@ the `MET_` prefix; see [.env.example](.env.example).
 
 ## API
 
-`GET /api/works` with optional `q` (1 to 100 characters, default `bread`) and `limit`
-(1 to 20, default 5).
+`GET /api/works` with a required `limit` (integer, 1 to 20) and an optional `q`
+(1 to 100 ASCII characters, not blank, default `bread`).
 
 ```json
 {
@@ -60,7 +62,7 @@ the `MET_` prefix; see [.env.example](.env.example).
 | Status | Meaning |
 |---|---|
 | 200 | Success. `results` may be shorter than `limit` if fewer works match. |
-| 422 | Invalid `q` or `limit`. |
+| 400 | Malformed input: `limit` missing, non-integer or out of bounds; `q` blank, too long or containing non-ASCII characters. The body lists the offending parameter. |
 | 502 | The Met API failed after retries. |
 | 503 | The Met is rate-limiting this service. `Retry-After` says when to try again. |
 
@@ -115,7 +117,7 @@ Measured while building this, not taken from the docs:
 
 - `/v1/search` was retired on 2026-10-01 (HTTP 410). Only `/v1.1/search` works.
 - A lone `dateBegin` without `dateEnd` is silently ignored, so the client refuses to send one.
-- An empty `q` returns the entire collection; the API rejects blank queries.
+- An empty `q` returns the entire collection; the API rejects blank queries with a 400.
 - The documented limit is 80 requests/second, but the edge protection (Incapsula) blocks a
   client that sends roughly a hundred requests within half a minute, serving an HTML 403 for
   a minute or so.
@@ -162,4 +164,8 @@ the spanning-object case. CI runs lint, type-check and tests on every push and p
 - **In-process cache.** Fine for one instance; swap for Redis to scale out.
 - **Fail fast on throttling.** Waiting out the Met's block inside a request would mean
   30-second responses. A 503 with `Retry-After` is honest and lets callers decide.
+- **400, not 422, for bad input.** FastAPI defaults to 422, which comes from WebDAV and is
+  best suited to semantically invalid request bodies. For malformed query parameters, 400 is
+  the conventional status every client understands; one handler maps all validation errors
+  to it so the API never mixes the two.
 - **Not done:** rate limiting of our own callers, authentication, a frontend, Docker image.

@@ -16,8 +16,11 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Protocol
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, Query, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import AfterValidator
 
 from met_bread import __version__
 from met_bread.config import Settings
@@ -26,6 +29,20 @@ from met_bread.models import WorksResponse
 from met_bread.service import WorksService
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_query(value: str) -> str:
+    """Reject blank or non-ASCII search terms.
+
+    ``min_length`` alone lets whitespace through, and the Met's index is English-language:
+    accented or non-Latin input is almost always a client bug (bad encoding, wrong field),
+    so it is clearer to fail loudly than to return an empty result.
+    """
+    if not value.strip():
+        raise ValueError("must not be blank")
+    if not value.isascii():
+        raise ValueError("must contain only ASCII characters")
+    return value
 
 
 class WorksProvider(Protocol):
@@ -77,28 +94,37 @@ def create_app(
     )
     async def get_works(
         request: Request,
+        limit: Annotated[
+            int,
+            Query(
+                ge=1,
+                le=settings.max_limit,
+                description=f"How many works to return (1 to {settings.max_limit}); required",
+            ),
+        ],
         q: Annotated[
             str,
             Query(
                 min_length=1,
                 max_length=settings.max_query_length,
-                description="Search term, matched against the Met's full-text index",
+                description="Search term (ASCII only), matched against the Met's full-text index",
             ),
+            AfterValidator(_validate_query),
         ] = settings.default_query,
-        limit: Annotated[
-            int,
-            Query(ge=1, le=settings.max_limit, description="How many works to return"),
-        ] = settings.default_limit,
     ) -> WorksResponse:
-        # ``min_length`` does not catch whitespace-only input, so check that explicitly here.
-        if not q.strip():
-            raise HTTPException(status_code=422, detail="q must not be blank")
         provider: WorksProvider = request.app.state.service
         return await provider.top_recent(q, limit)
 
     @app.get("/health", summary="Liveness probe")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(_: Request, exc: RequestValidationError) -> JSONResponse:
+        # FastAPI defaults to 422 for validation failures. For malformed query parameters,
+        # 400 Bad Request is the conventional, universally understood status, so use that
+        # while keeping FastAPI's per-field error list (which names the offending parameter).
+        return JSONResponse(status_code=400, content={"detail": jsonable_encoder(exc.errors())})
 
     @app.exception_handler(MetThrottledError)
     async def upstream_throttled(_: Request, exc: MetThrottledError) -> JSONResponse:

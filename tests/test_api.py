@@ -52,10 +52,10 @@ def make_client(settings):
     return factory
 
 
-def test_defaults_to_bread_and_five_results(make_client):
+def test_query_defaults_to_bread(make_client):
     service = FakeService()
     with make_client(service) as http:
-        response = http.get("/api/works")
+        response = http.get("/api/works", params={"limit": 5})
     assert response.status_code == 200
     assert service.calls == [("bread", 5)]
     body = response.json()
@@ -75,27 +75,51 @@ def test_custom_query_and_limit_are_passed_through(make_client):
 @pytest.mark.parametrize(
     "params",
     [
-        {"q": ""},
-        {"q": "   "},
-        {"q": "a" * 101},
-        {"limit": 0},
-        {"limit": 999},
-        {"limit": "five"},
+        pytest.param({"limit": 5, "q": ""}, id="blank-q"),
+        pytest.param({"limit": 5, "q": "   "}, id="whitespace-q"),
+        pytest.param({"limit": 5, "q": "a" * 101}, id="q-too-long"),
+        pytest.param({"limit": 5, "q": "br\u00ebad"}, id="q-latin-accent"),
+        pytest.param({"limit": 5, "q": "\u30d1\u30f3"}, id="q-non-latin-script"),
+        pytest.param({"limit": 5, "q": "bread \U0001f35e"}, id="q-emoji"),
+        pytest.param({"q": "bread"}, id="limit-missing"),
+        pytest.param({"q": "bread", "limit": 0}, id="limit-too-small"),
+        pytest.param({"q": "bread", "limit": 21}, id="limit-too-large"),
+        pytest.param({"q": "bread", "limit": "five"}, id="limit-not-an-integer"),
+        pytest.param({"q": "bread", "limit": "2.5"}, id="limit-not-whole"),
     ],
 )
-def test_invalid_input_is_rejected_before_reaching_the_service(make_client, params):
+def test_malformed_input_is_a_400_and_never_reaches_the_service(make_client, params):
     service = FakeService()
     with make_client(service) as http:
         response = http.get("/api/works", params=params)
-    assert response.status_code == 422
-    assert "detail" in response.json()
+    assert response.status_code == 400
+    body = response.json()
+    assert "detail" in body
+    # The error names the offending parameter so callers can fix it.
+    assert "q" in str(body["detail"]) or "limit" in str(body["detail"])
     assert service.calls == []
+
+
+def test_ascii_punctuation_in_query_is_allowed(make_client):
+    service = FakeService()
+    with make_client(service) as http:
+        response = http.get("/api/works", params={"q": "bread & butter, 1900's", "limit": 5})
+    assert response.status_code == 200
+    assert service.calls == [("bread & butter, 1900's", 5)]
+
+
+def test_limit_bounds_are_inclusive(make_client):
+    service = FakeService()
+    with make_client(service) as http:
+        assert http.get("/api/works", params={"limit": 1}).status_code == 200
+        assert http.get("/api/works", params={"limit": 20}).status_code == 200
+    assert [limit for _, limit in service.calls] == [1, 20]
 
 
 def test_upstream_failure_maps_to_502(make_client):
     service = FakeService(error=MetUpstreamError("Met API request failed after 3 attempts"))
     with make_client(service) as http:
-        response = http.get("/api/works")
+        response = http.get("/api/works", params={"limit": 5})
     assert response.status_code == 502
     assert "Met" in response.json()["detail"]
 
@@ -103,7 +127,7 @@ def test_upstream_failure_maps_to_502(make_client):
 def test_throttled_upstream_maps_to_503_with_retry_after(make_client):
     service = FakeService(error=MetThrottledError(retry_after_s=30))
     with make_client(service) as http:
-        response = http.get("/api/works")
+        response = http.get("/api/works", params={"limit": 5})
     assert response.status_code == 503
     assert response.headers["retry-after"] == "30"
     assert "rate" in response.json()["detail"].lower()
