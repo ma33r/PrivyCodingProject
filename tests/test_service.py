@@ -98,7 +98,7 @@ class TestTopRecent:
         # The whole point: we did not fetch the 200-object tail, and the whole request
         # stayed within a modest upstream budget (the Met's edge throttles bursty clients).
         assert len(client.fetched) < 20
-        assert client.requests_made <= 35
+        assert client.requests_made <= 30
 
     async def test_results_are_well_formed_works(self, settings: Settings):
         service = WorksService(FakeMetClient(MODERN), settings)

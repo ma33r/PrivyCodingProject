@@ -3,9 +3,11 @@
 Responsibilities, and nothing more:
 
 * Build correct URLs/params for ``/v1.1/search`` and ``/v1/objects/{id}``.
-* Enforce politeness: an identifying User-Agent, bounded concurrency, and retries with
-  exponential backoff for transient failures (including the bot-protection HTML page the
-  Met's edge serves with a 403 when requests arrive in a burst).
+* Enforce politeness: an identifying User-Agent, bounded concurrency, a smoothed request
+  rate, and retries with exponential backoff for transient failures.
+* Fail fast when the Met's edge protection kicks in (HTTP 403 with an HTML body): the block
+  lasts far longer than any sane retry budget, so the client enters a cooldown during which
+  every call raises ``MetThrottledError`` immediately instead of making things worse.
 * Page through search results while respecting the Met's hard 10 000-result ceiling.
 
 Everything that interprets the data (thresholds, ranking) lives elsewhere.
@@ -17,6 +19,8 @@ import asyncio
 import logging
 import math
 import random
+import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -27,13 +31,21 @@ from met_bread.pacing import RateLimiter
 
 logger = logging.getLogger(__name__)
 
-#: Statuses worth retrying. 403 is included deliberately: the Met returns it from its
-#: bot-protection layer under bursty load, and it clears within seconds.
-_RETRYABLE_STATUSES = frozenset({403, 408, 425, 429, 500, 502, 503, 504})
+#: Statuses worth retrying. 403 is deliberately *not* here: it is the Met's bot protection,
+#: which does not clear within a request's lifetime (see ``MetThrottledError``).
+_RETRYABLE_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 
 class MetUpstreamError(Exception):
     """The Met API could not be reached, or kept failing after all retries."""
+
+
+class MetThrottledError(MetUpstreamError):
+    """The Met's edge protection is blocking this client; callers should back off."""
+
+    def __init__(self, retry_after_s: float) -> None:
+        super().__init__(f"Met API is throttling this client; retry in {retry_after_s:.0f}s")
+        self.retry_after_s = retry_after_s
 
 
 class TooManyResultsError(Exception):
@@ -57,10 +69,13 @@ class MetClient:
         http: httpx.AsyncClient,
         settings: Settings,
         limiter: RateLimiter | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._http = http
         self._settings = settings
         self._base_url = settings.base_url.rstrip("/")
+        self._clock = clock
+        self._throttled_until = 0.0
         # Two independent brakes: the semaphore caps how many requests are in flight at
         # once, the limiter caps how many are *started* per second (see pacing.py).
         self._semaphore = asyncio.Semaphore(settings.max_concurrency)
@@ -164,9 +179,9 @@ class MetClient:
         """GET ``url`` and return its decoded JSON body, retrying transient failures.
 
         Retryable: transport errors, the statuses in ``_RETRYABLE_STATUSES``, and any
-        response whose body is not JSON (the bot-protection interstitial is HTML even when
-        it arrives with a 200). Not retryable: 404 (optionally mapped to ``None``) and other
-        4xx responses, which indicate a bug on our side rather than a transient upstream issue.
+        response whose body is not JSON. Not retryable: 403 (edge protection: opens a
+        cooldown and raises ``MetThrottledError``), 404 (optionally mapped to ``None``) and
+        other 4xx responses, which indicate a bug on our side rather than a transient issue.
         """
         attempts = self._settings.max_retries + 1
         failure = "unknown"
@@ -175,6 +190,7 @@ class MetClient:
             if attempt > 1:
                 await asyncio.sleep(self._backoff_seconds(attempt))
 
+            self._raise_if_throttled()
             await self.limiter.acquire()
             self.requests_made += 1
             try:
@@ -193,6 +209,8 @@ class MetClient:
                 continue
 
             status = response.status_code
+            if status == 403:
+                self._enter_cooldown(url)
             if status == 404 and none_on_404:
                 return None
             if status in _RETRYABLE_STATUSES or status >= 500:
@@ -213,6 +231,21 @@ class MetClient:
         raise MetUpstreamError(
             f"Met API request failed after {attempts} attempts ({failure}): {url}"
         )
+
+    def _raise_if_throttled(self) -> None:
+        remaining = self._throttled_until - self._clock()
+        if remaining > 0:
+            raise MetThrottledError(retry_after_s=remaining)
+
+    def _enter_cooldown(self, url: str) -> None:
+        cooldown = self._settings.throttle_cooldown_s
+        self._throttled_until = self._clock() + cooldown
+        logger.warning(
+            "Met edge protection returned 403 (url=%s); pausing all requests for %.0fs",
+            url,
+            cooldown,
+        )
+        raise MetThrottledError(retry_after_s=cooldown)
 
     def _backoff_seconds(self, attempt: int) -> float:
         """Exponential backoff with full jitter: base * 2^(n-1) plus up to one extra base."""

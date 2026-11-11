@@ -1,13 +1,9 @@
 """Process-wide request pacing for the Met API.
 
-The Met documents an 80 requests/second ceiling, but its edge protection in practice starts
-answering 403 to a client that issues a few hundred requests within a handful of seconds, and
-the block lasts long enough that in-request retries cannot ride it out. One cold query costs
-a few dozen requests, so two or three cold queries in quick succession were enough to trip it.
-
-``RateLimiter`` spaces outgoing requests evenly and deliberately does *not* bank unused
-capacity: a client that was idle for a minute is not allowed a burst afterwards, because the
-burst is precisely what gets blocked.
+The Met documents an 80 requests/second ceiling, but its edge protection also reacts to
+bursts. ``RateLimiter`` smooths our outgoing rate and deliberately does *not* bank unused
+capacity: a client that was idle for a minute is not allowed a burst afterwards. (The Met's
+longer-horizon request budget is handled separately by the cooldown in ``met_client.py``.)
 """
 
 from __future__ import annotations

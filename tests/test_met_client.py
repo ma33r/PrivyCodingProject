@@ -5,7 +5,12 @@ import asyncio
 import httpx
 import pytest
 
-from met_bread.met_client import MetClient, MetUpstreamError, TooManyResultsError
+from met_bread.met_client import (
+    MetClient,
+    MetThrottledError,
+    MetUpstreamError,
+    TooManyResultsError,
+)
 from tests.conftest import load_fixture, load_fixture_text
 
 SEARCH = "https://collectionapi.metmuseum.org/public/collection/v1.1/search"
@@ -104,21 +109,6 @@ class TestGetObject:
 
 
 class TestResilience:
-    async def test_retries_bot_protection_403_html_page(self, client, respx_mock):
-        route = respx_mock.get(f"{OBJECTS}/1")
-        route.side_effect = [
-            httpx.Response(
-                403,
-                text=load_fixture_text("blocked_403.html"),
-                headers={"content-type": "text/html"},
-            ),
-            httpx.Response(200, json={"objectID": 1, "objectEndDate": 1900}),
-        ]
-        obj = await client.get_object(1)
-        assert obj is not None and obj.object_end_date == 1900
-        assert route.call_count == 2
-        assert client.requests_made == 2
-
     async def test_retries_transport_errors(self, client, respx_mock):
         route = respx_mock.get(f"{OBJECTS}/1")
         route.side_effect = [
@@ -191,3 +181,41 @@ class TestPacing:
         async with httpx.AsyncClient() as http:
             client = MetClient(http, settings)
         assert client.limiter.rate_per_s == 0
+
+
+class TestThrottling:
+    """A 403 from the Met is its edge protection, which lasts far longer than any sane
+    in-request retry budget. Fail fast, and stop sending for a while."""
+
+    def _blocked(self) -> httpx.Response:
+        return httpx.Response(
+            403, text=load_fixture_text("blocked_403.html"), headers={"content-type": "text/html"}
+        )
+
+    async def test_403_fails_fast_without_retrying(self, client, respx_mock):
+        route = respx_mock.get(f"{OBJECTS}/1").mock(return_value=self._blocked())
+        with pytest.raises(MetThrottledError) as excinfo:
+            await client.get_object(1)
+        assert route.call_count == 1
+        assert excinfo.value.retry_after_s > 0
+        assert isinstance(excinfo.value, MetUpstreamError)  # generic handlers still apply
+
+    async def test_subsequent_calls_short_circuit_during_cooldown(self, client, respx_mock):
+        route = respx_mock.get(f"{OBJECTS}/1").mock(return_value=self._blocked())
+        with pytest.raises(MetThrottledError):
+            await client.get_object(1)
+        with pytest.raises(MetThrottledError):
+            await client.search_total("bread")
+        assert route.call_count == 1  # nothing else was sent to the Met
+
+    async def test_cooldown_expires(self, settings, respx_mock):
+        now = {"t": 1000.0}
+        route = respx_mock.get(f"{OBJECTS}/1")
+        route.side_effect = [self._blocked(), httpx.Response(200, json={"objectID": 1})]
+        async with httpx.AsyncClient() as http:
+            client = MetClient(http, settings, clock=lambda: now["t"])
+            with pytest.raises(MetThrottledError):
+                await client.get_object(1)
+            now["t"] += settings.throttle_cooldown_s + 1
+            assert await client.get_object(1) is not None
+        assert route.call_count == 2

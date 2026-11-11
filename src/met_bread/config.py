@@ -21,14 +21,16 @@ class Settings(BaseSettings):
     # Identify ourselves to the Met; anonymous bursty traffic trips their bot protection.
     user_agent: str = "met-bread-api/0.1 (+https://github.com/ma33r/PrivyCodingProject)"
 
-    # Politeness / resilience. The Met asks for < 80 req/s; its edge 403s well before that
-    # when requests arrive in a tight burst, so we keep concurrency modest and retry with backoff.
+    # Politeness / resilience. The Met documents an 80 req/s ceiling, but its edge protection
+    # blocks (HTTP 403) a client that sends roughly a hundred requests within half a minute,
+    # and the block outlasts any sensible in-request retry. So: modest concurrency, smoothed
+    # request rate, retries only for genuinely transient failures, and a cooldown during
+    # which we stop sending altogether after a 403 (see met_client.py).
     max_concurrency: int = Field(6, ge=1)
-    # Observed: ~150 requests within ~5 s earned a multi-second 403 block, so pace well below
-    # that. One cold query costs ~35 requests; 0 disables pacing (tests).
-    max_requests_per_second: float = Field(15.0, ge=0)
+    max_requests_per_second: float = Field(40.0, ge=0)  # 0 disables pacing (tests)
     max_retries: int = Field(3, ge=0)
     backoff_base_s: float = Field(0.5, ge=0)
+    throttle_cooldown_s: float = Field(30.0, ge=0)
 
     # Search pagination constraints imposed by the Met: pages of at most 500, and
     # offset + limit may not exceed 10 000 (so larger result sets cannot be fully enumerated).

@@ -1,5 +1,3 @@
-import asyncio
-
 import pytest
 
 from met_bread.models import MetObject
@@ -38,50 +36,46 @@ class TestRankWorks:
         assert [o.object_id for o in ranked] == [471028, 284537]
 
 
-def make_counter(begin_years: list[int]):
-    """Fake `count_from` backed by a list of object begin years; records calls and concurrency."""
+def make_counter(end_years: list[int]):
+    """Fake oracle: how many objects have objectEndDate >= year. Records every call."""
     calls: list[int] = []
-    inflight = {"now": 0, "max": 0}
 
-    async def count_from(year: int) -> int:
+    async def count_at_least(year: int) -> int:
         calls.append(year)
-        inflight["now"] += 1
-        inflight["max"] = max(inflight["max"], inflight["now"])
-        await asyncio.sleep(0)  # yield so concurrent probes overlap
-        inflight["now"] -= 1
-        return sum(1 for b in begin_years if b >= year)
+        return sum(1 for end in end_years if end >= year)
 
-    return count_from, calls, inflight
+    return count_at_least, calls
 
 
 class TestFindThresholdYear:
     async def test_finds_latest_year_with_enough_matches(self):
-        begins = [2010, 1998, 1997, 1989, 1987, 1986, 1984, 1981] + [1950] * 100
-        count_from, calls, _ = make_counter(begins)
-        # Exactly five objects begin in 1987 or later; only four begin in 1988 or later.
-        assert await find_threshold_year(count_from, need=5) == 1987
-        # A dense grid in recent centuries plus small refinement rounds: ~20 probes,
-        # not a per-year scan. This is a regression guard on upstream request volume.
-        assert len(calls) <= 25
+        ends = [2010, 1998, 1998, 1992, 1989, 1987, 1984, 1981] + [1950] * 100
+        count_at_least, calls = make_counter(ends)
+        # Exactly five objects end in 1989 or later; only four end in 1990 or later.
+        assert await find_threshold_year(count_at_least, need=5) == 1989
+        # Bisection over the Met's date range: ~15 sequential probes, never a per-year scan.
+        # This is a regression guard on upstream request volume.
+        assert len(calls) <= 16
 
     async def test_returns_none_when_collection_is_smaller_than_need(self):
-        count_from, _, _ = make_counter([2000, 1900])
-        assert await find_threshold_year(count_from, need=5) is None
+        count_at_least, calls = make_counter([2000, 1900])
+        assert await find_threshold_year(count_at_least, need=5) is None
+        assert len(calls) == 1  # one probe at the floor settles it
 
     async def test_exactly_need_matches_in_latest_year(self):
-        count_from, _, _ = make_counter([2000] * 5)
-        assert await find_threshold_year(count_from, need=5) == 2000
+        count_at_least, _ = make_counter([2000] * 5)
+        assert await find_threshold_year(count_at_least, need=5) == 2000
 
     async def test_handles_bc_dates(self):
-        count_from, _, _ = make_counter([-500] * 5 + [-2000] * 3)
-        assert await find_threshold_year(count_from, need=5) == -500
+        count_at_least, _ = make_counter([-500] * 5 + [-2000] * 3)
+        assert await find_threshold_year(count_at_least, need=5) == -500
 
-    async def test_probes_run_concurrently(self):
-        count_from, _, inflight = make_counter([1950] * 10)
-        await find_threshold_year(count_from, need=5)
-        assert inflight["max"] > 1
+    async def test_respects_custom_bounds(self):
+        count_at_least, calls = make_counter([1995] * 5)
+        assert await find_threshold_year(count_at_least, need=5, floor=1900, ceiling=2030) == 1995
+        assert min(calls) >= 1900 and max(calls) <= 2030
 
     async def test_rejects_non_positive_need(self):
-        count_from, _, _ = make_counter([2000])
+        count_at_least, _ = make_counter([2000])
         with pytest.raises(ValueError):
-            await find_threshold_year(count_from, need=0)
+            await find_threshold_year(count_at_least, need=0)

@@ -7,21 +7,22 @@ records that must be fetched to a few dozen using only cheap, ID-only search req
 
 1. Ask how many objects match at all.
 2. Use the date-filtered search as a counting oracle to find the latest year ``Y`` such that
-   at least ``limit`` matches *begin* in ``Y`` or later (``ranking.find_threshold_year``).
-3. Work out which object IDs could have ``objectEndDate >= Y`` (``_candidate_ids``), fetch
-   just those records, and sort them by their real ``objectEndDate``.
+   at least ``limit`` matches have ``objectEndDate >= Y`` (``ranking.find_threshold_year``).
+3. Work out which object IDs have ``objectEndDate >= Y`` (``_candidate_ids``), fetch just
+   those records, and sort them by their real ``objectEndDate``.
 
-Step 3 has a subtlety worth understanding. The Met's date filter is a *containment* test
-(``begin >= dateBegin AND end <= dateEnd``), so the window ``[Y, 9999]`` misses any object
-that began before ``Y`` but ended after it, e.g. an object dated "1520 or 19th-20th century"
-with ``objectEndDate == 1999``. The complement, however, *is* expressible: every object with
-``end <= Y - 1`` is exactly the window ``[-9999, Y - 1]``. So
+Steps 2 and 3 share a subtlety worth understanding. The Met's date filter is a *containment*
+test (``begin >= dateBegin AND end <= dateEnd``), so the window ``[Y, 9999]`` misses any
+object that began before ``Y`` but ended after it, e.g. an object dated "1520 or 19th-20th
+century" with ``objectEndDate == 1999``. The complement, however, *is* expressible: every
+object with ``end <= Y - 1`` is exactly the window ``[-9999, Y - 1]``. So
 
-    candidates = all_matching_ids - ids_in([-9999, Y - 1])
+    count(objectEndDate >= Y) = total - count_in([-9999, Y - 1])          (step 2)
+    candidates                = all_matching_ids - ids_in([-9999, Y - 1])  (step 3)
 
-is precisely the set with ``objectEndDate >= Y``, spanning objects included. This needs the
-full ID list, which the Met only lets us page through up to 10 000 results; beyond that we
-fall back to the window alone and flag the response as not ``exact``.
+are precise, spanning objects included. Step 3 needs the full ID list, which the Met only
+lets us page through up to 10 000 results; beyond that we fall back to the ``[Y, 9999]``
+window alone and flag the response as not ``exact``.
 """
 
 from __future__ import annotations
@@ -35,13 +36,9 @@ from met_bread.cache import TTLCache
 from met_bread.config import Settings
 from met_bread.met_client import TooManyResultsError
 from met_bread.models import MetObject, Work, WorksResponse
-from met_bread.ranking import find_threshold_year, rank_works
+from met_bread.ranking import MAX_YEAR, MIN_YEAR, find_threshold_year, rank_works
 
 logger = logging.getLogger(__name__)
-
-#: The Met's own bounds for date filters (negative years are BC).
-MIN_YEAR = -9999
-MAX_YEAR = 9999
 
 CacheKey = tuple[str, int]
 
@@ -109,11 +106,15 @@ class WorksService:
         if total == 0:
             return WorksResponse(query=query, total_matches=0, exact=True, results=[])
 
-        async def count_from(year: int) -> int:
-            # "How many matches were made entirely in `year` or later?" — see module docstring.
-            return await self._client.search_total(query, date_begin=year, date_end=MAX_YEAR)
+        async def count_at_least(year: int) -> int:
+            # "How many matches have objectEndDate >= year?" Everything not inside the
+            # containment window [-9999, year - 1]; see the module docstring.
+            if year <= MIN_YEAR:
+                return total
+            before = await self._client.search_total(query, date_begin=MIN_YEAR, date_end=year - 1)
+            return max(0, total - before)
 
-        threshold = await find_threshold_year(count_from, need=limit)
+        threshold = await find_threshold_year(count_at_least, need=limit)
         candidate_ids, exact = await self._candidate_ids(query, total, threshold)
         objects = await self._fetch_objects(candidate_ids)
         ranked = rank_works(objects, limit)

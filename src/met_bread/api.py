@@ -10,6 +10,7 @@ below reference the ``settings`` closure variable, which a stringified annotatio
 
 import asyncio
 import logging
+import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Protocol
@@ -20,7 +21,7 @@ from fastapi.responses import JSONResponse
 
 from met_bread import __version__
 from met_bread.config import Settings
-from met_bread.met_client import MetClient, MetUpstreamError
+from met_bread.met_client import MetClient, MetThrottledError, MetUpstreamError
 from met_bread.models import WorksResponse
 from met_bread.service import WorksService
 
@@ -98,6 +99,22 @@ def create_app(
     @app.get("/health", summary="Liveness probe")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.exception_handler(MetThrottledError)
+    async def upstream_throttled(_: Request, exc: MetThrottledError) -> JSONResponse:
+        # Not our outage and not permanent: tell clients exactly when to come back.
+        retry_after = max(1, math.ceil(exc.retry_after_s))
+        logger.warning("upstream throttled: %s", exc)
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": str(retry_after)},
+            content={
+                "detail": (
+                    "The Met Museum API is rate-limiting this service; "
+                    f"retry in about {retry_after} seconds."
+                )
+            },
+        )
 
     @app.exception_handler(MetUpstreamError)
     async def upstream_error(_: Request, exc: MetUpstreamError) -> JSONResponse:

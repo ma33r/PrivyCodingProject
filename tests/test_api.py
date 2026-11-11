@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from met_bread.api import create_app
-from met_bread.met_client import MetUpstreamError
+from met_bread.met_client import MetThrottledError, MetUpstreamError
 from met_bread.models import Work, WorksResponse
 from met_bread.service import WorksService
 
@@ -98,6 +98,15 @@ def test_upstream_failure_maps_to_502(make_client):
         response = http.get("/api/works")
     assert response.status_code == 502
     assert "Met" in response.json()["detail"]
+
+
+def test_throttled_upstream_maps_to_503_with_retry_after(make_client):
+    service = FakeService(error=MetThrottledError(retry_after_s=30))
+    with make_client(service) as http:
+        response = http.get("/api/works")
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "30"
+    assert "rate" in response.json()["detail"].lower()
 
 
 def test_health_endpoint(make_client):
