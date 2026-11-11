@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     # So: modest concurrency, a smoothed request rate, short jittered retries for transient
     # failures, and for a 403 a longer, increasing wait-and-retry schedule followed by a
     # cooldown during which we stop sending altogether (see met_client.py).
+    # Process-wide: one MetClient (and one semaphore) serves every incoming API request, so
+    # this bounds the total number of in-flight Met requests, not the number per API call.
     max_concurrency: int = Field(6, ge=1)
     max_requests_per_second: float = Field(40.0, ge=0)  # 0 disables pacing (tests)
     max_retries: int = Field(3, ge=0)

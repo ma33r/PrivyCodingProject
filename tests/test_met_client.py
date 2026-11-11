@@ -297,3 +297,39 @@ class TestThrottling:
                 await h.client.get_object(1)
         assert h.waits() == []
         assert route.call_count == 1
+
+
+class TestGlobalConcurrency:
+    async def test_limit_is_shared_across_concurrent_api_queries(self, settings, respx_mock):
+        """The app builds one MetClient for its lifetime, so the semaphore bounds the *total*
+        number of in-flight Met requests, not the number per incoming API request."""
+        from met_bread.service import WorksService
+
+        inflight = {"now": 0, "max": 0}
+
+        async def slow(request: httpx.Request) -> httpx.Response:
+            inflight["now"] += 1
+            inflight["max"] = max(inflight["max"], inflight["now"])
+            await asyncio.sleep(0.005)
+            inflight["now"] -= 1
+            if request.url.path.endswith("/search"):
+                # 40 matches, all ending in 1950; every object is a candidate.
+                date_end = request.url.params.get("dateEnd")
+                ids = list(range(1, 41)) if date_end is None or int(date_end) >= 1950 else []
+                return httpx.Response(200, json={"total": len(ids), "objectIDs": ids or None})
+            object_id = int(request.url.path.rsplit("/", 1)[1])
+            return httpx.Response(
+                200, json={"objectID": object_id, "objectBeginDate": 1950, "objectEndDate": 1950}
+            )
+
+        respx_mock.route(url__regex=r".*collectionapi\.metmuseum\.org.*").mock(side_effect=slow)
+        async with httpx.AsyncClient() as http:
+            client = MetClient(http, settings)  # one client, as in api.py's lifespan
+            service = WorksService(client, settings)
+            # Three "API requests" for different terms arriving at the same time.
+            await asyncio.gather(
+                service.top_recent("bread", 5),
+                service.top_recent("cheese", 5),
+                service.top_recent("wine", 5),
+            )
+        assert 1 < inflight["max"] <= settings.max_concurrency
