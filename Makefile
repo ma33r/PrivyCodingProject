@@ -28,3 +28,6 @@ live:
 
 demo:
 	scripts/demo.sh http://$${MET_HOST:-127.0.0.1}:$${MET_PORT:-8000}
+
+throttle-test:
+	$(PY) scripts/throttle_probe.py --base-url http://$${MET_HOST:-127.0.0.1}:$${MET_PORT:-8000}

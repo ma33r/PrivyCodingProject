@@ -153,10 +153,18 @@ tests/            Unit tests with mocked HTTP; one opt-in live test
 ## Development
 
 ```bash
-make test    # unit tests, no network
-make lint    # ruff + mypy (strict)
-make live    # one real run against the Met (MET_LIVE=1)
+make test            # unit tests, no network
+make lint            # ruff + mypy (strict)
+make live            # one real run against the Met (MET_LIVE=1)
+make throttle-test   # with the server running: trip the Met's bot detection on purpose
 ```
+
+`make throttle-test` runs [scripts/throttle_probe.py](scripts/throttle_probe.py), which fires
+distinct cold queries at the local server in small waves and stops at the first 503. Watch the
+server log alongside it to see the 403 backoff schedule play out. Observed on 2026-11-11:
+three concurrent cold queries (about 90 Met requests in two seconds) were enough to trigger
+the block, and it outlasted the 3 + 7 + 15 second schedule, so the request ended in a 503
+with `Retry-After: 30`. Give the Met a minute afterwards.
 
 Tests were written before each module. HTTP is mocked with respx; the service is tested
 against an in-memory fake that reproduces the Met's containment-filter semantics, including

@@ -16,6 +16,9 @@ def main() -> None:
         level=settings.log_level.upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # httpx logs every upstream request at INFO (dozens per query); our own summary lines
+    # and the Met-throttling warnings are what operators actually need to see.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     uvicorn.run(
         "met_bread.api:create_app",
         factory=True,
