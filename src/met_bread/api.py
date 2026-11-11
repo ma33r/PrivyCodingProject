@@ -11,6 +11,7 @@ below reference the ``settings`` closure variable, which a stringified annotatio
 import asyncio
 import logging
 import math
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Protocol
@@ -113,7 +114,13 @@ def create_app(
         ] = settings.default_limit,
     ) -> WorksResponse:
         provider: WorksProvider = request.app.state.service
-        return await provider.top_recent(q, limit)
+        # Latency is stamped here, per request, rather than inside the service: the service
+        # caches its responses, so a value stored there would replay the original cold-query
+        # time on every cache hit.
+        started = time.perf_counter()
+        result = await provider.top_recent(q, limit)
+        latency_ms = round((time.perf_counter() - started) * 1000, 2)
+        return result.model_copy(update={"latency_ms": latency_ms})
 
     @app.get("/health", summary="Liveness probe")
     async def health() -> dict[str, str]:

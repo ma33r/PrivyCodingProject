@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -59,7 +61,7 @@ def test_defaults_to_bread_and_five_results(make_client):
     assert response.status_code == 200
     assert service.calls == [("bread", 5)]
     body = response.json()
-    assert set(body) == {"query", "total_matches", "exact", "results"}
+    assert set(body) == {"query", "total_matches", "exact", "results", "latency_ms"}
     assert body["results"][0]["object_id"] == 299320
     assert body["results"][0]["image_url"] is None
 
@@ -120,6 +122,32 @@ def test_limit_bounds_are_inclusive(make_client):
         assert http.get("/api/works", params={"limit": 1}).status_code == 200
         assert http.get("/api/works", params={"limit": 20}).status_code == 200
     assert [limit for _, limit in service.calls] == [1, 20]
+
+
+class TestLatency:
+    def test_response_includes_latency_in_ms(self, make_client):
+        with make_client(FakeService()) as http:
+            body = http.get("/api/works").json()
+        assert isinstance(body["latency_ms"], int | float)
+        assert body["latency_ms"] >= 0
+
+    def test_latency_is_measured_per_request_not_taken_from_the_cached_value(self, make_client):
+        # The service caches WorksResponse objects for an hour. If latency were stamped there,
+        # every cache hit would report the original cold-query time.
+        stale = SAMPLE.model_copy(update={"latency_ms": 9999.0})
+        with make_client(FakeService(response=stale)) as http:
+            body = http.get("/api/works").json()
+        assert body["latency_ms"] < 1000
+
+    def test_latency_grows_with_service_time(self, make_client):
+        class SlowService(FakeService):
+            async def top_recent(self, query: str, limit: int) -> WorksResponse:
+                await asyncio.sleep(0.05)
+                return await super().top_recent(query, limit)
+
+        with make_client(SlowService()) as http:
+            body = http.get("/api/works").json()
+        assert 50 <= body["latency_ms"] < 5000
 
 
 def test_upstream_failure_maps_to_502(make_client):

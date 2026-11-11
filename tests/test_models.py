@@ -73,3 +73,16 @@ def test_works_response_serialises_to_plain_json():
     assert data["exact"] is True
     assert data["results"][0]["object_id"] == 299320
     assert data["results"][0]["object_end_date"] == 2010
+
+
+class TestLatency:
+    def test_defaults_to_zero_and_serialises(self):
+        resp = WorksResponse(query="bread", total_matches=0, exact=True, results=[])
+        assert resp.latency_ms == 0.0
+        assert resp.model_dump(mode="json")["latency_ms"] == 0.0
+
+    def test_rejects_negative_latency(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            WorksResponse(query="bread", total_matches=0, exact=True, results=[], latency_ms=-1)

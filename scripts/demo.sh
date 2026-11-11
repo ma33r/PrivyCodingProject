@@ -16,7 +16,7 @@ try:
 except ValueError:
     print(body); print(meta); sys.exit()
 if "results" in data:
-    print(f"  query={data[\"query\"]!r} total_matches={data[\"total_matches\"]} exact={data[\"exact\"]}")
+    print(f"  query={data[\"query\"]!r} total_matches={data[\"total_matches\"]} exact={data[\"exact\"]} latency_ms={data[\"latency_ms\"]}")
     for w in data["results"]:
         print(f"  {w[\"object_end_date\"]:>5}  {w[\"title\"][:60]!s:<60} {w[\"artist\"] or \"\"}")
 else:

@@ -108,6 +108,14 @@ class WorksResponse(BaseModel):
         )
     )
     results: list[Work] = Field(description="Up to `limit` works, most recent first")
+    latency_ms: float = Field(
+        0.0,
+        ge=0,
+        description=(
+            "Server-side time spent answering this request, in milliseconds. "
+            "Cached responses report a few milliseconds; cold queries reach out to the Met."
+        ),
+    )
 
 
 def _or_none(value: str) -> str | None:

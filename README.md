@@ -43,6 +43,7 @@ and optional `limit` (integer, 1 to 20, default 5).
   "query": "bread",
   "total_matches": 2055,
   "exact": true,
+  "latency_ms": 1437.52,
   "results": [
     {
       "object_id": 299320,
@@ -70,6 +71,9 @@ and optional `limit` (integer, 1 to 20, default 5).
 `exact` is `true` when every matching object was considered. It is `false` only for terms
 with more than 10 000 matches, where the Met API cannot enumerate the full result set (see
 below).
+
+`latency_ms` is the server-side time spent on that request. A cold query spends it talking to
+the Met; a cached one reports a few milliseconds.
 
 `GET /health` returns `{"status": "ok"}`.
 
