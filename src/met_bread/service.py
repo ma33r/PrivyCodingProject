@@ -115,7 +115,7 @@ class WorksService:
             return max(0, total - before)
 
         threshold = await find_threshold_year(count_at_least, need=limit)
-        candidate_ids, exact = await self._candidate_ids(query, total, threshold)
+        candidate_ids, exact = await self._candidate_ids(query, total, threshold, limit)
         objects = await self._fetch_objects(candidate_ids)
         ranked = rank_works(objects, limit)
 
@@ -138,7 +138,7 @@ class WorksService:
         )
 
     async def _candidate_ids(
-        self, query: str, total: int, threshold: int | None
+        self, query: str, total: int, threshold: int | None, limit: int
     ) -> tuple[list[int], bool]:
         """Return ``(object IDs worth fetching, whether that set is provably complete)``.
 
@@ -153,13 +153,15 @@ class WorksService:
 
         if total <= self._settings.max_enumerable:
             try:
-                return await self._complement_candidates(query, threshold)
+                return await self._complement_candidates(query, threshold, limit)
             except TooManyResultsError:
                 logger.warning("query=%r grew past the enumeration cap; using window", query)
 
-        return await self._window_candidates(query, threshold)
+        return await self._window_candidates(query, limit)
 
-    async def _complement_candidates(self, query: str, threshold: int) -> tuple[list[int], bool]:
+    async def _complement_candidates(
+        self, query: str, threshold: int, limit: int
+    ) -> tuple[list[int], bool]:
         """Exact path: all matches minus those that ended before ``threshold``."""
         all_ids, before_ids = await asyncio.gather(
             self._client.search_all_ids(query),
@@ -177,14 +179,26 @@ class WorksService:
                 len(candidates),
                 self._settings.max_candidates,
             )
-            return await self._window_candidates(query, threshold)
+            return await self._window_candidates(query, limit)
 
         return candidates, True
 
-    async def _window_candidates(self, query: str, threshold: int) -> tuple[list[int], bool]:
-        """Approximate path: only objects that *begin* at or after ``threshold``."""
+    async def _window_candidates(self, query: str, limit: int) -> tuple[list[int], bool]:
+        """Approximate path: only objects that *begin* at or after a threshold.
+
+        The main threshold counts objects by *end* date, which the window cannot express, so
+        this path bisects again on "how many matches begin in Y or later" to guarantee at
+        least ``limit`` candidates. Objects that began earlier but ended later are missed,
+        hence ``exact=False``.
+        """
+
+        async def count_beginning_at_least(year: int) -> int:
+            return await self._client.search_total(query, date_begin=year, date_end=MAX_YEAR)
+
+        threshold = await find_threshold_year(count_beginning_at_least, need=limit)
+        begin = threshold if threshold is not None else MIN_YEAR
         ids = await self._client.search_all_ids(
-            query, date_begin=threshold, date_end=MAX_YEAR, allow_truncation=True
+            query, date_begin=begin, date_end=MAX_YEAR, allow_truncation=True
         )
         return ids, False
 

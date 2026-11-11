@@ -25,3 +25,6 @@ run:
 
 live:
 	MET_LIVE=1 $(PY) -m pytest tests/test_integration_live.py -v
+
+demo:
+	scripts/demo.sh http://$${MET_HOST:-127.0.0.1}:$${MET_PORT:-8000}
